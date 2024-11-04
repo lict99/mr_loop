@@ -141,57 +141,69 @@
     exposure_p,
     clump_params) {
   message("Clumping exposure data...")
-  for (idx in seq_along(fmt_exp_data)) {
-    tmp_df <- fmt_exp_data[[idx]]
 
-    pval_nm <- "pval.exposure"
-    if (!(pval_nm %in% colnames(tmp_df))) {
-      stop("No p-value column in the exposure data", call. = FALSE)
-    }
-    if (!is.numeric(tmp_df[[pval_nm]])) {
-      stop("P-value column is not numeric in the exposure data", call. = FALSE)
-    }
-
-    tmp_df_filter <- tmp_df[tmp_df[[pval_nm]] <= exposure_p, , drop = FALSE]
-
-    if (nrow(tmp_df_filter) == 0L) {
-      fmt_exp_data[[idx]] <- data.frame(
-        id = tmp_df[["id.exposure"]][[1]],
-        info = "No significant exposure SNP with below given p-value"
-      )
-      next
-    }
-    clump_params[["dat"]] <- tmp_df_filter
-    clump_df <- tryCatch(
-      do.call(TwoSampleMR::clump_data, clump_params),
-      error = function(e) {
-        data.frame(
-          id = tmp_df[["id.exposure"]][[1]],
-          info = paste("When clumping exposure data,", trimws(as.character(e)))
+  clumped_exp_data <- lapply(
+    fmt_exp_data,
+    function(df) {
+      if (!("pval.exposure" %in% colnames(df))) {
+        stop("No p-value column in the exposure data", call. = FALSE)
+      }
+      if (!is.numeric(df[["pval.exposure"]])) {
+        stop(
+          "P-value column is not numeric in the exposure data",
+          call. = FALSE
         )
       }
-    )
-    if (nrow(clump_df) == 0L) {
-      fmt_exp_data[[idx]] <- data.frame(
-        id = tmp_df[["id.exposure"]][[1]],
-        info = "No exposure SNP after clumping"
+
+      df_filter <- df[df[["pval.exposure"]] <= exposure_p, , drop = FALSE]
+
+      if (nrow(df_filter) == 0L) {
+        return(
+          data.frame(
+            id = df[["id.exposure"]][[1]],
+            info = "No significant exposure SNP with below given p-value"
+          )
+        )
+      }
+
+      clump_params[["dat"]] <- df_filter
+      clump_df <- tryCatch(
+        do.call(TwoSampleMR::clump_data, clump_params),
+        error = function(e) {
+          data.frame(
+            id = df[["id.exposure"]][[1]],
+            info = paste(
+              "When clumping exposure data,",
+              trimws(as.character(e))
+            )
+          )
+        }
       )
-    } else {
-      fmt_exp_data[[idx]] <- clump_df
+
+      if (nrow(clump_df) == 0L) {
+        return(
+          data.frame(
+            id = df[["id.exposure"]][[1]],
+            info = "No exposure SNP after clumping"
+          )
+        )
+      }
+
+      return(clump_df)
     }
-  }
+  )
 
   is_valid_clump <- vapply(
-    fmt_exp_data,
+    clumped_exp_data,
     function(x) !(ncol(x) == 2L && ("info" %in% colnames(x))),
     FUN.VALUE = logical(1L),
     USE.NAMES = FALSE
   )
 
-  error_df_clump <- do.call(rbind, fmt_exp_data[!is_valid_clump])
-  fmt_exp_data <- fmt_exp_data[is_valid_clump]
+  error_df_clump <- do.call(rbind, clumped_exp_data[!is_valid_clump])
+  clumped_exp_data <- clumped_exp_data[is_valid_clump]
 
-  return(list(data = fmt_exp_data, error_df = error_df_clump))
+  return(list(data = clumped_exp_data, error_df = error_df_clump))
 }
 
 .harmonise_data <- function(
