@@ -1,12 +1,12 @@
-.fmt_exp_data <- function(
-    exposure_files,
-    fmt_exposure_params) {
+.fmt_exp_data <- function(exposure_files, fmt_exposure_params) {
   message("Reading exposure data...")
+
   fmt_exp_data <- lapply(
     exposure_files,
     function(file) {
       data <- data.table::fread(
         file,
+        header = TRUE,
         data.table = FALSE,
         showProgress = FALSE
       )
@@ -39,7 +39,8 @@
           id_exp <- data[[fmt_exposure_params[["id_col"]]]][[1]]
           return(
             data.frame(
-              id = if (is.na(id_exp)) basename(file) else id_exp,
+              id_exposure = if (is.na(id_exp)) basename(file) else id_exp,
+              id_outcome = NA_character_,
               info = paste0(
                 "When formatting exposure data with file `",
                 basename(file), "`, ",
@@ -56,7 +57,7 @@
 
   is_valid_exp <- vapply(
     fmt_exp_data,
-    function(x) !(ncol(x) == 2L && "info" %in% colnames(x)),
+    function(x) !(ncol(x) == 3L && "info" %in% colnames(x)),
     FUN.VALUE = logical(1L),
     USE.NAMES = FALSE
   )
@@ -67,18 +68,29 @@
   return(list(data = fmt_exp_data, error_df = error_df_exp))
 }
 
-.fmt_otc_data <- function(
-    outcome_files,
-    fmt_outcome_params) {
+.fmt_otc_data <- function(outcome_files, fmt_outcome_params, clumped_snps) { # nolint: cyclocomp_linter, line_length_linter.
   message("Reading outcome data...")
+
   fmt_otc_data <- lapply(
     outcome_files,
     function(file) {
       data <- data.table::fread(
         file,
+        header = TRUE,
         data.table = FALSE,
         showProgress = FALSE
       )
+
+      snp_col_arg <- fmt_outcome_params[["snp_col"]]
+      if (is.null(snp_col_arg)) {
+        snp_col_arg <- as.list(formals(TwoSampleMR::format_data))$snp_col
+        if (!(snp_col_arg %in% colnames(data))) {
+          stop("No SNP column in the outcome data", call. = FALSE)
+        }
+      } else if (!(snp_col_arg %in% colnames(data))) {
+        stop("No SNP column in the outcome data", call. = FALSE)
+      }
+      data <- data[data[[snp_col_arg]] %in% clumped_snps, , drop = FALSE]
 
       id_col_arg <- fmt_outcome_params[["id_col"]]
       if (is.null(id_col_arg) || !(id_col_arg %in% colnames(data))) {
@@ -108,7 +120,8 @@
           id_otc <- data[[fmt_outcome_params[["id_col"]]]][[1]]
           return(
             data.frame(
-              id = if (is.na(id_otc)) basename(file) else id_otc,
+              id_exposure = NA_character_,
+              id_outcome = if (is.na(id_otc)) basename(file) else id_otc,
               info = paste0(
                 "When formatting outcome data with file `",
                 basename(file), "`, ",
@@ -125,7 +138,7 @@
 
   is_valid_otc <- vapply(
     fmt_otc_data,
-    function(x) !(ncol(x) == 2L && "info" %in% colnames(x)),
+    function(x) !(ncol(x) == 3L && "info" %in% colnames(x)),
     FUN.VALUE = logical(1L),
     USE.NAMES = FALSE
   )
@@ -136,10 +149,7 @@
   return(list(data = fmt_otc_data, error_df = error_df_otc))
 }
 
-.clump_exp_data <- function(
-    fmt_exp_data,
-    exposure_p,
-    clump_params) {
+.clump_exp_data <- function(fmt_exp_data, exposure_p, clump_params) {
   message("Clumping exposure data...")
 
   clumped_exp_data <- lapply(
@@ -160,18 +170,21 @@
       if (nrow(df_filter) == 0L) {
         return(
           data.frame(
-            id = df[["id.exposure"]][[1]],
+            id_exposure = df[["id.exposure"]][[1]],
+            id_outcome = NA_character_,
             info = "No significant exposure SNP with below given p-value"
           )
         )
       }
 
       clump_params[["dat"]] <- df_filter
+
       clump_df <- tryCatch(
         do.call(TwoSampleMR::clump_data, clump_params),
         error = function(e) {
           data.frame(
-            id = df[["id.exposure"]][[1]],
+            id_exposure = df[["id.exposure"]][[1]],
+            id_outcome = NA_character_,
             info = paste(
               "When clumping exposure data,",
               trimws(as.character(e))
@@ -183,7 +196,8 @@
       if (nrow(clump_df) == 0L) {
         return(
           data.frame(
-            id = df[["id.exposure"]][[1]],
+            id_exposure = df[["id.exposure"]][[1]],
+            id_outcome = NA_character_,
             info = "No exposure SNP after clumping"
           )
         )
@@ -195,21 +209,24 @@
 
   is_valid_clump <- vapply(
     clumped_exp_data,
-    function(x) !(ncol(x) == 2L && ("info" %in% colnames(x))),
+    function(x) !(ncol(x) == 3L && ("info" %in% colnames(x))),
     FUN.VALUE = logical(1L),
     USE.NAMES = FALSE
   )
 
   error_df_clump <- do.call(rbind, clumped_exp_data[!is_valid_clump])
   clumped_exp_data <- clumped_exp_data[is_valid_clump]
+  snps <- unique(
+    unlist(
+      lapply(clumped_exp_data, function(x) x[["SNP"]]),
+      use.names = FALSE
+    )
+  )
 
-  return(list(data = clumped_exp_data, error_df = error_df_clump))
+  return(list(data = clumped_exp_data, error_df = error_df_clump, snps = snps))
 }
 
-.harmonise_data <- function(
-    clumped_exp_data,
-    fmt_otc_data,
-    harmonise_params) {
+.harmonise_data <- function(clumped_exp_data, fmt_otc_data, harmonise_params) {
   message("Harmonising data...")
 
   combined_idx <- expand.grid(
@@ -217,36 +234,33 @@
     outcome = seq_along(fmt_otc_data)
   )
 
-  harmonise_data <- lapply(
+  harmonise_data <- future.apply::future_lapply(
     seq_len(nrow(combined_idx)),
     function(idx) {
       exp_idx <- combined_idx[idx, ][[1]]
       otc_idx <- combined_idx[idx, ][[2]]
       exp_df <- clumped_exp_data[[exp_idx]]
       otc_df <- fmt_otc_data[[otc_idx]]
+
       if (length(intersect(exp_df[["SNP"]], otc_df[["SNP"]])) == 0L) {
         return(
           data.frame(
-            id = paste(
-              exp_df[["id.exposure"]][[1]],
-              otc_df[["id.outcome"]][[1]],
-              sep = " | "
-            ),
+            id_exposure = exp_df[["id.exposure"]][[1]],
+            id_outcome = otc_df[["id.outcome"]][[1]],
             info = "No common SNP when harmonising"
           )
         )
       }
+
       harmonise_params[["exposure_dat"]] <- exp_df
       harmonise_params[["outcome_dat"]] <- otc_df
+
       harmonise_df <- tryCatch(
         do.call(TwoSampleMR::harmonise_data, harmonise_params),
         error = function(e) {
           data.frame(
-            id = paste(
-              exp_df[["id.exposure"]][[1]],
-              otc_df[["id.outcome"]][[1]],
-              sep = " | "
-            ),
+            id_exposure = exp_df[["id.exposure"]][[1]],
+            id_outcome = otc_df[["id.outcome"]][[1]],
             info = paste("When harmonising data,", trimws(as.character(e)))
           )
         }
@@ -254,22 +268,20 @@
 
       if (sum(harmonise_df[["mr_keep"]]) == 0L) {
         harmonise_df <- data.frame(
-          id = paste(
-            exp_df[["id.exposure"]][[1]],
-            otc_df[["id.outcome"]][[1]],
-            sep = " | "
-          ),
+          id_exposure = exp_df[["id.exposure"]][[1]],
+          id_outcome = otc_df[["id.outcome"]][[1]],
           info = "No SNP available for MR analysis after harmonising"
         )
       }
 
       return(harmonise_df)
-    }
+    },
+    future.packages = c("TwoSampleMR")
   )
 
   is_valid_harmonise <- vapply(
     harmonise_data,
-    function(x) !(ncol(x) == 2L && "info" %in% colnames(x)),
+    function(x) !(ncol(x) == 3L && "info" %in% colnames(x)),
     FUN.VALUE = logical(1L),
     USE.NAMES = FALSE
   )
@@ -280,10 +292,9 @@
   return(list(data = harmonise_data, error_df = error_df_harmonise))
 }
 
-.run_mr <- function(
-    harmonise_data,
-    mr_params) {
+.run_mr <- function(harmonise_data, mr_params) {
   message("Running MR analysis...")
+
   mr_data <- future.apply::future_lapply(
     harmonise_data,
     function(df) {
@@ -296,11 +307,8 @@
         },
         error = function(e) {
           data.frame(
-            id = paste(
-              df[["id.exposure"]][[1]],
-              df[["id.outcome"]][[1]],
-              sep = " | "
-            ),
+            id_exposure = df[["id.exposure"]][[1]],
+            id_outcome = df[["id.outcome"]][[1]],
             info = paste("When Running MR,", trimws(as.character(e)))
           )
         }
@@ -312,7 +320,7 @@
 
   is_valid_mr <- vapply(
     mr_data,
-    function(x) !(ncol(x) == 2L && "info" %in% colnames(x)),
+    function(x) !(ncol(x) == 3L && "info" %in% colnames(x)),
     FUN.VALUE = logical(1L),
     USE.NAMES = FALSE
   )
@@ -344,14 +352,6 @@ run_mr_loop <- function(
   error_df_exp <- fmt_exp_data[["error_df"]]
   fmt_exp_data <- fmt_exp_data[["data"]]
 
-  fmt_otc_data <- .fmt_otc_data(
-    outcome_files = outcome_files,
-    fmt_outcome_params = fmt_outcome_params
-  )
-
-  error_df_otc <- fmt_otc_data[["error_df"]]
-  fmt_otc_data <- fmt_otc_data[["data"]]
-
   clumped_exp_data <- .clump_exp_data(
     fmt_exp_data = fmt_exp_data,
     exposure_p = exposure_p,
@@ -359,7 +359,17 @@ run_mr_loop <- function(
   )
 
   error_df_clump <- clumped_exp_data[["error_df"]]
+  clumped_snps <- clumped_exp_data[["snps"]]
   clumped_exp_data <- clumped_exp_data[["data"]]
+
+  fmt_otc_data <- .fmt_otc_data(
+    outcome_files = outcome_files,
+    fmt_outcome_params = fmt_outcome_params,
+    clumped_snps = clumped_snps
+  )
+
+  error_df_otc <- fmt_otc_data[["error_df"]]
+  fmt_otc_data <- fmt_otc_data[["data"]]
 
   harmonise_data <- .harmonise_data(
     clumped_exp_data = clumped_exp_data,
@@ -381,9 +391,9 @@ run_mr_loop <- function(
   mr_df <- do.call(rbind, mr_data)
 
   error_df <- rbind(
-    error_df_otc,
     error_df_exp,
     error_df_clump,
+    error_df_otc,
     error_df_harmonise,
     error_df_mr
   )
